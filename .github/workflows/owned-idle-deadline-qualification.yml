@@ -1,0 +1,115 @@
+name: Owned fork idle deadline qualification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: owned-idle-deadline-qualification
+  cancel-in-progress: false
+jobs:
+  qualify:
+    if: github.repository == 'rudycelekli/agentic-qe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - lane: candidate
+            ref: 0ddebd38b6586e4b72d60cd5e0b57f89666b3754
+            tree: efcb570368032bf7e5a88eb6b8f8d3fba8c01148
+          - lane: baseline
+            ref: b8577baec707acb6e92c7da2d212c8a0cc1d43c0
+            tree: 0c7832a8d3987f95e64d07b01149feb033e11f18
+    env:
+      CI: 'true'
+      ONNXRUNTIME_NODE_INSTALL: skip
+      AQE_LLM_ROUTER_DISABLED: 'true'
+      AQE_MEMORY_BACKEND: memory
+      AQE_EMBEDDER_ENDPOINT: http://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # upstream v7
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - name: Verify exact source and tree
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ matrix.ref }}'
+          test "$(git rev-parse HEAD^{tree})" = '${{ matrix.tree }}'
+          mkdir -p qualification
+          git rev-parse HEAD HEAD^{tree} > qualification/revisions.txt
+          sha256sum package-lock.json > qualification/lockfile.sha256
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # upstream v7
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - name: Frozen lock installation and native lifecycle
+        id: install
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee qualification/install.log
+          git diff --exit-code -- package.json package-lock.json
+      - name: Required documented validate command
+        id: validate
+        if: always() && steps.install.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run validate 2>&1 | tee qualification/validate.log
+      - name: Actual typecheck script
+        if: always() && steps.install.outcome == 'success'
+        id: typecheck
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run typecheck 2>&1 | tee qualification/typecheck.log
+      - name: Actual lint script
+        if: always() && steps.install.outcome == 'success'
+        id: lint
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run lint 2>&1 | tee qualification/lint.log
+      - name: Actual build script
+        if: always() && steps.install.outcome == 'success'
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee qualification/build.log
+      - name: Actual required broad coverage command unchanged
+        id: coverage
+        if: always() && steps.install.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee qualification/test-coverage.log
+      - name: Candidate native transport and focused helper coverage
+        id: focused
+        if: always() && matrix.lane == 'candidate' && steps.install.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run test:coverage -- tests/unit/shared/llm/provider-response-deadline.test.ts tests/unit/shared/llm/response-deadline-backpressure.test.ts --coverage.include=src/shared/llm/providers/response-deadline.ts --coverage.reporter=json-summary --coverage.reporter=text --coverage.reportsDirectory=qualification/focused --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80 2>&1 | tee qualification/focused.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # upstream v7
+        if: always()
+        with:
+          name: idle-qualification-${{ matrix.lane }}
+          path: |
+            qualification/
+            coverage/coverage-summary.json
+            junit.xml
+          retention-days: 14
+      - name: Do not report a missing or failed required gate as green
+        if: always()
+        run: |
+          test '${{ steps.install.outcome }}' = success
+          test '${{ steps.validate.outcome }}' = success
+          test '${{ steps.typecheck.outcome }}' = success
+          test '${{ steps.lint.outcome }}' = success
+          test '${{ steps.build.outcome }}' = success
+          test '${{ steps.coverage.outcome }}' = success
+          if test '${{ matrix.lane }}' = candidate; then
+            test '${{ steps.focused.outcome }}' = success
+          fi
