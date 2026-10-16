@@ -44,7 +44,10 @@ export async function fetchWithResponseDeadline(
       return response;
     }
 
-    resetIdleDeadline();
+    // Backpressure is a consumer pause, not network silence. Idle time is
+    // measured only while an underlying read is pending; the absolute cap
+    // still bounds the entire request, including consumer pauses.
+    if (bodyDeadline === 'idle') clearTimeout(timer);
     const reader = response.body.getReader();
     let finished = false;
     const finish = () => {
@@ -63,14 +66,15 @@ export async function fetchWithResponseDeadline(
       },
       async pull(controller) {
         try {
+          resetIdleDeadline();
           const result = await reader.read();
+          if (bodyDeadline === 'idle') clearTimeout(timer);
           if (finished) return;
           if (result.done) {
             finish();
             reader.releaseLock();
             controller.close();
           } else {
-            resetIdleDeadline();
             controller.enqueue(result.value);
           }
         } catch (error) {
