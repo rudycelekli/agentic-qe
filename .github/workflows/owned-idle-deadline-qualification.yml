@@ -1,5 +1,8 @@
 name: Owned fork idle deadline qualification
 on:
+  push:
+    branches: ['qualification/qe-idle-deadline-20261016']
+    paths: ['.github/workflows/owned-idle-deadline-qualification.yml']
   workflow_dispatch:
 permissions:
   contents: read
