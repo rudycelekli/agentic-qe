@@ -29,7 +29,6 @@ jobs:
       CI: 'true'
       ONNXRUNTIME_NODE_INSTALL: skip
       AQE_LLM_ROUTER_DISABLED: 'true'
-      AQE_MEMORY_BACKEND: memory
       AQE_EMBEDDER_ENDPOINT: http://127.0.0.1:1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # upstream v7
