@@ -1,450 +1,183 @@
-name: Optimized CI
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
-  workflow_dispatch:
-
-# On PRs: cancel stale runs when a new push arrives (old run is obsolete).
-# On main: never cancel — every push must run to completion for accurate CI signal.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
+name: AQE1091 skipped gates continuation with inherited lint evidence
+'on': workflow_dispatch
 permissions:
   contents: read
-  actions: write
-  pull-requests: write
-  checks: write
-
-# GitHub-hosted runners execute the CPU paths. onnxruntime-node bundles its
-# CPU runtime but downloads extra CUDA providers from NuGet by default on
-# linux/x64; that external postinstall fetch can fail and block unrelated PRs.
-env:
-  ONNXRUNTIME_NODE_INSTALL: skip
-
-# ─── Shared exclusions for journey test shards ───
-# The original test:journeys:ci command excludes these directories:
-#   browser, browser-integration, mcp, sync, learning, domains, llm, n8n, *.e2e.test.ts
-# By targeting specific subdirectories per shard, most exclusions are implicit.
-# Only the "remaining" shard needs explicit excludes.
-
 jobs:
-  # Prove the published minimum independently from the Node 24 primary lanes.
-  node-22-compatibility:
-    name: Node 22 compatibility
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      ONNXRUNTIME_NODE_INSTALL: skip
+      CI: 'true'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '22.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test:unit:fast
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: rudycelekli/agentic-qe
+        ref: c889e37bc3645b3b39fcbf620c0921c61295b0ef
+        persist-credentials: false
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: 24.13.0
+    - name: Freeze exact original source and evaluator
+      run: 'python - <<''PREP''
 
-  # ─── Security audit (fail fast on high/critical CVEs) ───
-  # Cheap (~30s), independent of the test shards. Runs in parallel with them
-  # so a known CVE blocks the build without waiting for journey tests. Scoped
-  # to production deps (--omit=dev) because devDep CVEs do not ship to users;
-  # those are visible in the second step as a warning, not a failure.
-  security-audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci --ignore-scripts
-      - name: Block on high+critical CVEs in production deps
-        run: npm audit --audit-level=high --omit=dev
-      - name: Report devDep CVEs (non-blocking)
-        if: always()
-        run: npm audit --audit-level=high || echo "::warning::devDep CVEs found — fix before they migrate into prod"
+        import base64,hashlib,json,subprocess
 
-  # ─── Witness chain audit gate (ADR-070 Phase 6.2 / A13) ───
-  # Seeds a throwaway chain (append -> archive -> verify, then a deliberate
-  # tamper) and exercises the real `aqe audit verify --chain=audit` path
-  # end-to-end. Cheap, independent of the test shards, runs against source
-  # via tsx — no committed memory.db to check, so this guards the verify()
-  # logic and CLI wiring itself, not any specific historical data.
-  witness-chain-audit-gate:
-    name: Witness Chain Audit Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npx tsx scripts/witness-chain-audit-gate.ts
+        from pathlib import Path
 
-  # ─── Journey Tests: 4 parallel shards ───
-  # Previously a single 25-min job that timed out. Now 4 shards of ~5-8 min each.
+        assert subprocess.check_output([''git'',''rev-parse'',''HEAD'']).decode().strip()==''c889e37bc3645b3b39fcbf620c0921c61295b0ef''
 
-  journey-governance:
-    name: Journey — Governance
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run governance integration tests
-        run: timeout 480 npx vitest run tests/integration/governance/ --reporter=verbose
-        env:
-          NODE_OPTIONS: '--max-old-space-size=1024'
+        assert subprocess.check_output([''git'',''rev-parse'',''HEAD^{tree}'']).decode().strip()==''85dcf8b3fb277d57cdd0be30479a5792bfd52324''
 
-  journey-ruvector-coordination:
-    name: Journey — RuVector + Coordination
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run ruvector + coordination integration tests
-        run: bash scripts/ci-vitest-run.sh tests/integration/ruvector/ tests/integration/coordination/ --reporter=verbose
-        env:
-          NODE_OPTIONS: '--max-old-space-size=1024'
+        files=subprocess.check_output([''git'',''ls-files'',''-z'']).decode().split(''\0'')[:-1]
 
-  journey-root:
-    name: Journey — Root-level
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run root-level integration tests
-        run: |
-          # Run only test files directly in tests/integration/ (not in subdirectories)
-          FILES=$(find tests/integration -maxdepth 1 -name '*.test.ts' ! -name '*.e2e.test.ts' | sort)
-          if [ -n "$FILES" ]; then
-            bash scripts/ci-vitest-run.sh $FILES --reporter=verbose
-          else
-            echo "No root-level integration tests found"
-          fi
-        env:
-          NODE_OPTIONS: '--max-old-space-size=1024'
+        identity={f:hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files if Path(f).is_file()}
 
-  journey-remaining:
-    name: Journey — Remaining Subdirs
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run remaining integration subdirectory tests
-        run: |
-          # Everything in tests/integration subdirs EXCEPT the ones covered by
-          # other shards (governance, ruvector, coordination) and the original
-          # exclusions (browser, mcp, sync, learning, domains, llm, n8n).
-          bash scripts/ci-vitest-run.sh \
-            tests/integration/adapters/ \
-            tests/integration/cli/ \
-            tests/integration/code-intelligence/ \
-            tests/integration/feedback/ \
-            tests/integration/migration/ \
-            tests/integration/opencode/ \
-            tests/integration/parsers/ \
-            tests/integration/planning/ \
-            tests/integration/protocols/ \
-            tests/integration/requirements-validation/ \
-            tests/integration/rl-suite/ \
-            tests/integration/rvf/ \
-            tests/integration/security/ \
-            tests/integration/templates/ \
-            tests/integration/test-execution/ \
-            tests/integration/test-generation/ \
-            tests/integration/validation/ \
-            --reporter=verbose
-        env:
-          NODE_OPTIONS: '--max-old-space-size=1024'
+        Path(''/tmp/base-identity.json'').write_text(json.dumps(identity,sort_keys=True))
 
-  # ─── Contract + Code Intelligence: separate parallel jobs ───
+        Path(''/tmp/original-test.ts'').write_bytes(Path(''tests/integration/learning/recommended-strategy-namespace.test.ts'').read_bytes())
 
-  contract-tests:
-    name: Contract Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run contract tests
-        run: |
-          if [ -d "tests/unit/domains/contract-testing" ] && [ "$(ls -A tests/unit/domains/contract-testing/*.test.ts 2>/dev/null)" ]; then
-            timeout 480 npm run test:contracts
-          else
-            echo "No contract tests found"
-          fi
-        env:
-          NODE_OPTIONS: '--max-old-space-size=512'
+        Path(''/tmp/baseline-test.ts'').write_bytes(base64.b64decode(''aW1wb3J0IHsgYWZ0ZXJFYWNoLCBiZWZvcmVFYWNoLCBkZXNjcmliZSwgZXhwZWN0LCBpdCB9IGZyb20gJ3ZpdGVzdCc7CmltcG9ydCB7IGFwcGVuZEZpbGVTeW5jLCBta2R0ZW1wU3luYywgcm1TeW5jIH0gZnJvbSAnbm9kZTpmcyc7CmltcG9ydCB7IHRtcGRpciB9IGZyb20gJ25vZGU6b3MnOwppbXBvcnQgeyBqb2luIH0gZnJvbSAnbm9kZTpwYXRoJzsKaW1wb3J0IHsgY3JlYXRlTWVtb3J5QmFja2VuZCB9IGZyb20gJy4uLy4uLy4uL3NyYy9rZXJuZWwvbWVtb3J5LWZhY3RvcnknOwppbXBvcnQgdHlwZSB7IE1lbW9yeUJhY2tlbmQgfSBmcm9tICcuLi8uLi8uLi9zcmMva2VybmVsL2ludGVyZmFjZXMnOwppbXBvcnQgeyByZXNldFVuaWZpZWRNZW1vcnkgfSBmcm9tICcuLi8uLi8uLi9zcmMva2VybmVsL3VuaWZpZWQtbWVtb3J5JzsKaW1wb3J0IHsgTWV0cmljc09wdGltaXplclNlcnZpY2UgfSBmcm9tICcuLi8uLi8uLi9zcmMvZG9tYWlucy9sZWFybmluZy1vcHRpbWl6YXRpb24vc2VydmljZXMvbWV0cmljcy1vcHRpbWl6ZXInOwppbXBvcnQgeyBMZWFybmluZ09wdGltaXplVG9vbCB9IGZyb20gJy4uLy4uLy4uL3NyYy9tY3AvdG9vbHMvbGVhcm5pbmctb3B0aW1pemF0aW9uL29wdGltaXplJzsKaW1wb3J0IHR5cGUgeyBFeHBlcmllbmNlLCBPcHRpbWl6ZWRTdHJhdGVneSB9IGZyb20gJy4uLy4uLy4uL3NyYy9kb21haW5zL2xlYXJuaW5nLW9wdGltaXphdGlvbi9pbnRlcmZhY2VzJzsKCmNvbnN0IE5TID0geyBuYW1lc3BhY2U6ICdsZWFybmluZy1vcHRpbWl6YXRpb24nIH07CmNvbnN0IGNvbnRleHQgPSB7IHRhZ3M6IFsndGVzdC1nZW5lcmF0aW9uJywgJ2NvdmVyYWdlJ10gfTsKCmRlc2NyaWJlLmVhY2goWydzcWxpdGUnLCAnbWVtb3J5J10gYXMgY29uc3QpKCdzdG9yZWQgc3RyYXRlZ3kgcmVjb21tZW5kYXRpb25zICglcyknLCBiYWNrZW5kVHlwZSA9PiB7CiAgbGV0IGRpcjogc3RyaW5nOwogIGxldCBtZW1vcnk6IE1lbW9yeUJhY2tlbmQ7CiAgbGV0IG9wdGltaXplcjogTWV0cmljc09wdGltaXplclNlcnZpY2U7CgogIGJlZm9yZUVhY2goYXN5bmMgKCkgPT4gewogICAgcmVzZXRVbmlmaWVkTWVtb3J5KCk7CiAgICBkaXIgPSBta2R0ZW1wU3luYyhqb2luKHRtcGRpcigpLCAnYXFlLXJlY29tbWVuZGF0aW9uLScpKTsKICAgICh7IGJhY2tlbmQ6IG1lbW9yeSB9ID0gYXdhaXQgY3JlYXRlTWVtb3J5QmFja2VuZCh7CiAgICAgIHR5cGU6IGJhY2tlbmRUeXBlLCBzcWxpdGU6IHsgcGF0aDogam9pbihkaXIsICdtZW1vcnkuZGInKSwgd2FsTW9kZTogdHJ1ZSB9LAogICAgfSwgdHJ1ZSkpOwogICAgb3B0aW1pemVyID0gbmV3IE1ldHJpY3NPcHRpbWl6ZXJTZXJ2aWNlKG1lbW9yeSwgeyBleHBsb3JhdGlvblJhdGU6IDAgfSk7CiAgfSk7CgogIGFmdGVyRWFjaChhc3luYyAoKSA9PiB7CiAgICBhd2FpdCBtZW1vcnkuZGlzcG9zZSgpOwogICAgcmVzZXRVbmlmaWVkTWVtb3J5KCk7CiAgICBybVN5bmMoZGlyLCB7IHJlY3Vyc2l2ZTogdHJ1ZSwgZm9yY2U6IHRydWUgfSk7CiAgfSk7CgogIGFzeW5jIGZ1bmN0aW9uIG9wdGltaXplKCk6IFByb21pc2U8T3B0aW1pemVkU3RyYXRlZ3k+IHsKICAgIGNvbnN0IGV4cGVyaWVuY2VzOiBFeHBlcmllbmNlW10gPSBBcnJheS5mcm9tKHsgbGVuZ3RoOiA0MCB9LCAoXywgaSkgPT4gKHsKICAgICAgaWQ6IGBzeW50aGV0aWMtJHtpfWAsCiAgICAgIGFnZW50SWQ6IHsgdmFsdWU6ICdzeW50aGV0aWMtb3B0aW1pemVyJywgZG9tYWluOiAndGVzdC1nZW5lcmF0aW9uJywgdHlwZTogJ3NwZWNpYWxpc3QnIH0sCiAgICAgIGRvbWFpbjogJ3Rlc3QtZ2VuZXJhdGlvbicsIGFjdGlvbjogJ2ZpeHR1cmUnLCBzdGF0ZTogeyBjb250ZXh0OiB7fSwgbWV0cmljczoge30gfSwKICAgICAgcmVzdWx0OiB7IHN1Y2Nlc3M6IHRydWUsIG91dGNvbWU6IHsgY292ZXJhZ2U6IDkwIH0sIGR1cmF0aW9uOiAxIH0sCiAgICAgIHJld2FyZDogMSwgdGltZXN0YW1wOiBuZXcgRGF0ZSgpLAogICAgfSkpOwogICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgb3B0aW1pemVyLm9wdGltaXplU3RyYXRlZ3koewogICAgICBuYW1lOiAnc3ludGhldGljLXJlY29yZGVkLXN0cmF0ZWd5JywgcGFyYW1ldGVyczogeyB0aW1lb3V0OiA3MDAwIH0sCiAgICAgIGV4cGVjdGVkT3V0Y29tZTogeyBjb3ZlcmFnZTogOTAgfSwKICAgIH0sIHsgbWV0cmljOiAnY292ZXJhZ2UnLCBkaXJlY3Rpb246ICdtYXhpbWl6ZScsIGNvbnN0cmFpbnRzOiBbXSB9LCBleHBlcmllbmNlcyk7CiAgICBpZiAoIXJlc3VsdC5zdWNjZXNzKSB0aHJvdyByZXN1bHQuZXJyb3I7CiAgICBleHBlY3QocmVzdWx0LnZhbHVlLmNvbmZpZGVuY2UpLnRvQmVHcmVhdGVyVGhhbigwLjYpOwogICAgcmV0dXJuIHJlc3VsdC52YWx1ZTsKICB9CgogIGl0KCdyZWNvbW1lbmRzIHRoZSBzdHJhdGVneSBhY3R1YWxseSBwZXJzaXN0ZWQgYnkgYW4gZWFybGllciBvcHRpbWl6ZXIgaW5zdGFuY2UnLCBhc3luYyAoKSA9PiB7CiAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOwogICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgbmV3IE1ldHJpY3NPcHRpbWl6ZXJTZXJ2aWNlKG1lbW9yeSkucmVjb21tZW5kU3RyYXRlZ3koY29udGV4dCk7CiAgICBleHBlY3QocmVzdWx0LnN1Y2Nlc3MpLnRvQmUodHJ1ZSk7CiAgICBpZiAocmVzdWx0LnN1Y2Nlc3MpIGV4cGVjdChyZXN1bHQudmFsdWUpLnRvRXF1YWwocmVjb3JkLm9wdGltaXplZFN0cmF0ZWd5KTsKICB9KTsKCiAgaXQoJ2lnbm9yZXMgYSBzYW1lLWtleSBkZWZhdWx0LW5hbWVzcGFjZSBkZWNveScsIGFzeW5jICgpID0+IHsKICAgIGNvbnN0IHJlY29yZCA9IGF3YWl0IG9wdGltaXplKCk7CiAgICBhd2FpdCBtZW1vcnkuc2V0KGBsZWFybmluZzpzdHJhdGVneTpvcHRpbWl6ZWQ6JHtyZWNvcmQuaWR9YCwgewogICAgICAuLi5yZWNvcmQsIG9wdGltaXplZFN0cmF0ZWd5OiB7IC4uLnJlY29yZC5vcHRpbWl6ZWRTdHJhdGVneSwgbmFtZTogJ3dyb25nLW5hbWVzcGFjZScgfSwKICAgIH0pOwogICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgb3B0aW1pemVyLnJlY29tbWVuZFN0cmF0ZWd5KGNvbnRleHQpOwogICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzICYmIHJlc3VsdC52YWx1ZS5uYW1lKS50b0JlKHJlY29yZC5vcHRpbWl6ZWRTdHJhdGVneS5uYW1lKTsKICB9KTsKCiAgaXQoJ3JldGFpbnMgdGhlIGNvbmZpZGVuY2UgdGhyZXNob2xkIGFuZCBkZWZhdWx0IHdoZW4gbm8gZWxpZ2libGUgc3RyYXRlZ3kgZXhpc3RzJywgYXN5bmMgKCkgPT4gewogICAgY29uc3QgcmVjb3JkID0gYXdhaXQgb3B0aW1pemUoKTsKICAgIGF3YWl0IG1lbW9yeS5zZXQoYGxlYXJuaW5nOnN0cmF0ZWd5Om9wdGltaXplZDoke3JlY29yZC5pZH1gLCB7IC4uLnJlY29yZCwgY29uZmlkZW5jZTogMC41IH0sIE5TKTsKICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IG9wdGltaXplci5yZWNvbW1lbmRTdHJhdGVneShjb250ZXh0KTsKICAgIGV4cGVjdChyZXN1bHQuc3VjY2VzcyAmJiByZXN1bHQudmFsdWUubmFtZSkudG9CZSgnZGVmYXVsdC1zdHJhdGVneScpOwogIH0pOwoKICBkZXNjcmliZS5lYWNoKFsKICAgIFsnc2VjdXJpdHktY29tcGxpYW5jZScsICdjb3ZlcmFnZSddLAogICAgWydjaGFvcy1yZXNpbGllbmNlJywgJ2xhdGVuY3knXSwKICBdKSgnZm9yZWlnbiByZXF1ZXN0ICglcywgJXMpJywgKGRvbWFpbiwgbWV0cmljKSA9PiB7CiAgICBpdCgncmV0dXJucyB0aGUgZGVmYXVsdCB0aHJvdWdoIHRoZSBzZXJ2aWNlJywgYXN5bmMgKCkgPT4gewogICAgICBhd2FpdCBvcHRpbWl6ZSgpOwogICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBvcHRpbWl6ZXIucmVjb21tZW5kU3RyYXRlZ3koeyB0YWdzOiBbZG9tYWluLCBtZXRyaWNdIH0pOwogICAgICBleHBlY3QocmVzdWx0LnN1Y2Nlc3MgJiYgcmVzdWx0LnZhbHVlLm5hbWUpLnRvQmUoJ2RlZmF1bHQtc3RyYXRlZ3knKTsKICAgIH0pOwoKICAgIGl0KCdyZXR1cm5zIHRoZSBkZWZhdWx0IHRocm91Z2ggdGhlIE1DUCBmYWxsYmFjaycsIGFzeW5jICgpID0+IHsKICAgICAgYXdhaXQgb3B0aW1pemUoKTsKICAgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgbmV3IExlYXJuaW5nT3B0aW1pemVUb29sKCkuaW52b2tlKHsKICAgICAgICBhY3Rpb246ICdvcHRpbWl6ZScsIGRvbWFpbiwKICAgICAgICBvYmplY3RpdmU6IHsgbWV0cmljLCBkaXJlY3Rpb246ICdtaW5pbWl6ZScgfSwKICAgICAgfSwgeyBtZW1vcnkgfSk7CiAgICAgIGV4cGVjdChyZXN1bHQuc3VjY2VzcykudG9CZSh0cnVlKTsKICAgICAgZXhwZWN0KHJlc3VsdC5kYXRhPy5vcHRpbWl6ZVJlc3VsdD8uYmVzdFN0cmF0ZWd5Lm5hbWUpLnRvQmUoJ2RlZmF1bHQtc3RyYXRlZ3knKTsKICAgIH0pOwogIH0pOwoKICBkZXNjcmliZS5lYWNoKFsKICAgIFsnbGF0ZW5jeScsICdtaW5pbWl6ZSddLAogICAgWydjb3ZlcmFnZScsICdtaW5pbWl6ZSddLAogIF0gYXMgY29uc3QpKCdzYW1lLWRvbWFpbiBvYmplY3RpdmUgcmVxdWVzdCAoJXMsICVzKScsIChtZXRyaWMsIGRpcmVjdGlvbikgPT4gewogICAgaXQoJ3JldHVybnMgZGVmYXVsdCBmb3IgYW4gaW5jb21wYXRpYmxlIG9iamVjdGl2ZSB0aHJvdWdoIHRoZSBzZXJ2aWNlJywgYXN5bmMgKCkgPT4gewogICAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOwogICAgICBleHBlY3QocmVjb3JkLm9iamVjdGl2ZSkudG9NYXRjaE9iamVjdCh7IG1ldHJpYzogJ2NvdmVyYWdlJywgZGlyZWN0aW9uOiAnbWF4aW1pemUnIH0pOwogICAgICBjb25zdCByZXF1ZXN0Q29udGV4dCA9IHsgdGFnczogWyd0ZXN0LWdlbmVyYXRpb24nLCBtZXRyaWNdLCBvYmplY3RpdmU6IHsgbWV0cmljLCBkaXJlY3Rpb24gfSB9OwogICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBvcHRpbWl6ZXIucmVjb21tZW5kU3RyYXRlZ3kocmVxdWVzdENvbnRleHQpOwogICAgICBpZiAocHJvY2Vzcy5lbnYuQVFFMTA5MV9SRUNFSVBUKSBhcHBlbmRGaWxlU3luYyhwcm9jZXNzLmVudi5BUUUxMDkxX1JFQ0VJUFQsIEpTT04uc3RyaW5naWZ5KHsgYmFja2VuZFR5cGUsIHBhdGg6ICdzZXJ2aWNlJywgcmVxdWVzdGVkOiByZXF1ZXN0Q29udGV4dCwgc3RvcmVkT2JqZWN0aXZlOiByZWNvcmQub2JqZWN0aXZlLCBzdG9yZWRTdHJhdGVneTogcmVjb3JkLm9wdGltaXplZFN0cmF0ZWd5LCByZXN1bHQgfSkgKyAnXG4nKTsKICAgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzKS50b0JlKHRydWUpOwogICAgICBleHBlY3QocmVzdWx0LnN1Y2Nlc3MgJiYgcmVzdWx0LnZhbHVlLm5hbWUpLnRvQmUoJ2RlZmF1bHQtc3RyYXRlZ3knKTsKICAgIH0pOwoKICAgIGl0KCdyZXR1cm5zIGRlZmF1bHQgZm9yIGFuIGluY29tcGF0aWJsZSBvYmplY3RpdmUgdGhyb3VnaCB0aGUgTUNQIGZhbGxiYWNrJywgYXN5bmMgKCkgPT4gewogICAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOwogICAgICBleHBlY3QocmVjb3JkLm9iamVjdGl2ZSkudG9NYXRjaE9iamVjdCh7IG1ldHJpYzogJ2NvdmVyYWdlJywgZGlyZWN0aW9uOiAnbWF4aW1pemUnIH0pOwogICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBuZXcgTGVhcm5pbmdPcHRpbWl6ZVRvb2woKS5pbnZva2UoewogICAgICAgIGFjdGlvbjogJ29wdGltaXplJywgZG9tYWluOiAndGVzdC1nZW5lcmF0aW9uJywgb2JqZWN0aXZlOiB7IG1ldHJpYywgZGlyZWN0aW9uIH0sCiAgICAgIH0sIHsgbWVtb3J5IH0pOwogICAgICBpZiAocHJvY2Vzcy5lbnYuQVFFMTA5MV9SRUNFSVBUKSBhcHBlbmRGaWxlU3luYyhwcm9jZXNzLmVudi5BUUUxMDkxX1JFQ0VJUFQsIEpTT04uc3RyaW5naWZ5KHsgYmFja2VuZFR5cGUsIHBhdGg6ICdNQ1AnLCByZXF1ZXN0ZWQ6IHsgbWV0cmljLCBkaXJlY3Rpb24gfSwgc3RvcmVkT2JqZWN0aXZlOiByZWNvcmQub2JqZWN0aXZlLCBzdG9yZWRTdHJhdGVneTogcmVjb3JkLm9wdGltaXplZFN0cmF0ZWd5LCByZXN1bHQgfSkgKyAnXG4nKTsKICAgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzKS50b0JlKHRydWUpOwogICAgICBleHBlY3QocmVzdWx0LmRhdGE/Lm9wdGltaXplUmVzdWx0Py5iZXN0U3RyYXRlZ3kubmFtZSkudG9CZSgnZGVmYXVsdC1zdHJhdGVneScpOwogICAgfSk7CiAgfSk7CgogIGl0KCdyZWplY3RzIGEgaGlnaGVyLXNjb3Jpbmcgb3RoZXItZG9tYWluIGNhbmRpZGF0ZSB3aXRob3V0IGhpZGluZyB0aGUgZWxpZ2libGUgc3RyYXRlZ3knLCBhc3luYyAoKSA9PiB7CiAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOwogICAgYXdhaXQgbWVtb3J5LnNldCgnbGVhcm5pbmc6c3RyYXRlZ3k6b3B0aW1pemVkOmZvcmVpZ24tZG9tYWluJywgewogICAgICAuLi5yZWNvcmQsIGlkOiAnZm9yZWlnbi1kb21haW4nLCBkb21haW46ICdzZWN1cml0eS1jb21wbGlhbmNlJywKICAgICAgY29uZmlkZW5jZTogMSwgaW1wcm92ZW1lbnQ6IDEwMDAwLAogICAgICBvcHRpbWl6ZWRTdHJhdGVneTogeyAuLi5yZWNvcmQub3B0aW1pemVkU3RyYXRlZ3ksIG5hbWU6ICdmb3JlaWduLWhpZ2gtc2NvcmUnIH0sCiAgICB9LCBOUyk7CiAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBvcHRpbWl6ZXIucmVjb21tZW5kU3RyYXRlZ3koY29udGV4dCk7CiAgICBleHBlY3QocmVzdWx0LnN1Y2Nlc3MgJiYgcmVzdWx0LnZhbHVlLm5hbWUpLnRvQmUocmVjb3JkLm9wdGltaXplZFN0cmF0ZWd5Lm5hbWUpOwogIH0pOwoKICBpdCgndXNlcyB0aGUgc3RvcmVkIHJlY29tbWVuZGF0aW9uIHRocm91Z2ggdGhlIHB1YmxpYyBNQ1Agb3B0aW1pemUgZmFsbGJhY2snLCBhc3luYyAoKSA9PiB7CiAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOwogICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgbmV3IExlYXJuaW5nT3B0aW1pemVUb29sKCkuaW52b2tlKHsKICAgICAgYWN0aW9uOiAnb3B0aW1pemUnLCBkb21haW46ICd0ZXN0LWdlbmVyYXRpb24nLAogICAgICBvYmplY3RpdmU6IHsgbWV0cmljOiAnY292ZXJhZ2UnLCBkaXJlY3Rpb246ICdtYXhpbWl6ZScgfSwKICAgIH0sIHsgbWVtb3J5IH0pOwogICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzKS50b0JlKHRydWUpOwogICAgZXhwZWN0KHJlc3VsdC5kYXRhPy5vcHRpbWl6ZVJlc3VsdD8uYmVzdFN0cmF0ZWd5KS50b0VxdWFsKHJlY29yZC5vcHRpbWl6ZWRTdHJhdGVneSk7CiAgfSk7Cn0pOwo=''))
 
-  code-intelligence-tests:
-    name: Code Intelligence Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run code intelligence tests
-        run: timeout 480 npm run test:code-intelligence
-        env:
-          NODE_OPTIONS: '--max-old-space-size=768'
-          SKIP_INTEGRATION_TESTS: 'true'
+        Path(''/tmp/evaluate-baseline.py'').write_bytes(base64.b64decode(''aW1wb3J0IHhtbC5ldHJlZS5FbGVtZW50VHJlZSBhcyBFCmltcG9ydCBzeXMKTkFNRVM9WydyZXR1cm5zIGRlZmF1bHQgZm9yIGFuIGluY29tcGF0aWJsZSBvYmplY3RpdmUgdGhyb3VnaCB0aGUgc2VydmljZScsJ3JldHVybnMgZGVmYXVsdCBmb3IgYW4gaW5jb21wYXRpYmxlIG9iamVjdGl2ZSB0aHJvdWdoIHRoZSBNQ1AgZmFsbGJhY2snXQpkZWYgYWNjZXB0cyhyKToKIGM9ci5maW5kYWxsKCcuLy90ZXN0Y2FzZScpOyBmPVt4IGZvciB4IGluIGMgaWYgeC5maW5kYWxsKCdmYWlsdXJlJyldCiByZXR1cm4gbGVuKGMpPT0yNiBhbmQgbGVuKGYpPT04IGFuZCBub3Qgci5maW5kYWxsKCcuLy9lcnJvcicpIGFuZCBub3Qgci5maW5kYWxsKCcuLy9za2lwcGVkJykgYW5kIGFsbChsZW4oeC5maW5kYWxsKCdmYWlsdXJlJykpPT0xIGFuZCB4LmZpbmQoJ2ZhaWx1cmUnKS5nZXQoJ3R5cGUnKT09J0Fzc2VydGlvbkVycm9yJyBhbmQgYW55KHguZ2V0KCduYW1lJywnJykuZW5kc3dpdGgobikgZm9yIG4gaW4gTkFNRVMpIGZvciB4IGluIGYpIGFuZCBhbGwoc3VtKHguZ2V0KCduYW1lJywnJykuZW5kc3dpdGgobikgZm9yIHggaW4gZik9PTQgZm9yIG4gaW4gTkFNRVMpCmRlZiBzYW1wbGUoKToKIHI9RS5FbGVtZW50KCd0ZXN0c3VpdGUnKQogZm9yIG4gaW4gTkFNRVM6CiAgZm9yIGkgaW4gcmFuZ2UoNCk6RS5TdWJFbGVtZW50KEUuU3ViRWxlbWVudChyLCd0ZXN0Y2FzZScsbmFtZT1uKSwnZmFpbHVyZScsdHlwZT0nQXNzZXJ0aW9uRXJyb3InKQogZm9yIGkgaW4gcmFuZ2UoMTgpOkUuU3ViRWxlbWVudChyLCd0ZXN0Y2FzZScsbmFtZT0nY29udHJvbCcrc3RyKGkpKQogcmV0dXJuIHIKYXNzZXJ0IGFjY2VwdHMoc2FtcGxlKCkpCmZvciBtdXRhdGUgaW4gW2xhbWJkYSByOnIucmVtb3ZlKHJbLTFdKSxsYW1iZGEgcjpFLlN1YkVsZW1lbnQoclstMV0sJ3NraXBwZWQnKSxsYW1iZGEgcjpFLlN1YkVsZW1lbnQoclstMV0sJ2Vycm9yJyksbGFtYmRhIHI6clswXS5zZXQoJ25hbWUnLCd3cm9uZyBmYWlsdXJlJyksbGFtYmRhIHI6clswXVswXS5zZXQoJ3R5cGUnLCdUeXBlRXJyb3InKV06CiByPXNhbXBsZSgpO211dGF0ZShyKTthc3NlcnQgbm90IGFjY2VwdHMocikKaWYgbGVuKHN5cy5hcmd2KT4xOmFzc2VydCBhY2NlcHRzKEUucGFyc2Uoc3lzLmFyZ3ZbMV0pLmdldHJvb3QoKSksJ0V4cGVjdGVkIGV4YWN0bHk4IG9iamVjdGl2ZSBtaXNtYXRjaCBBc3NlcnRpb25GYWlsdXJlcysxOCBjb250cm9scycKcHJpbnQoJ0V2YWx1YXRvcjFwb3NpdGl2ZTVuZWdhdGl2ZWNvbnRyb2xzUEFTUycpCg==''))
 
-  # ─── Infrastructure tests (unchanged, already parallel) ───
+        assert hashlib.sha256(Path(''/tmp/baseline-test.ts'').read_bytes()).hexdigest()==''0eb03608f1825d99284dd9414fd15dbc2a15fb48c6bf9917c7bf23181d9d4b5d''
 
-  infrastructure-tests:
-    name: Infrastructure Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run Infrastructure Tests
-        run: |
-          if [ -d "tests/infrastructure" ] && [ "$(ls -A tests/infrastructure/*.test.ts 2>/dev/null)" ]; then
-            timeout 480 npm run test:infrastructure
-          else
-            echo "No infrastructure tests found"
-          fi
-        env:
-          NODE_OPTIONS: '--max-old-space-size=768'
-      - name: Run Regression Tests
-        run: |
-          if [ -d "tests/regression" ] && [ "$(find tests/regression -name '*.test.ts' 2>/dev/null | head -1)" ]; then
-            timeout 480 npm run test:regression
-          else
-            echo "No regression tests found"
-          fi
-        env:
-          NODE_OPTIONS: '--max-old-space-size=512'
+        PREP
 
-  # ─── Postgres integration tests (unchanged) ───
+        mkdir -p "$RUNNER_TEMP/home"
 
-  integration-tests:
-    name: Postgres Integration Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: aqe_test
-          POSTGRES_USER: aqe_test
-          POSTGRES_PASSWORD: aqe_test
-        ports:
-          - 15432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run Postgres integration tests
-        run: timeout 480 npm run test:integration:pg
-        env:
-          POSTGRES_URL: postgresql://aqe_test:aqe_test@localhost:15432/aqe_test
-          NODE_OPTIONS: '--max-old-space-size=1024'
+        echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
 
-  # ─── Performance gates (after journey shards complete) ───
+        python /tmp/evaluate-baseline.py'
+    - name: Locked upstream dependencies
+      run: npm ci
+    - name: Document original source ESLint diagnostics before patch
+      run: 'set +e
 
-  performance-gates:
-    name: Performance Gates
-    runs-on: ubuntu-latest
-    needs: [journey-governance, journey-ruvector-coordination, journey-root, journey-remaining, contract-tests, code-intelligence-tests]
-    if: success()
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run Performance Gates
-        id: perf-gates
-        run: |
-          timeout 480 npm run performance:gate > perf-report.md 2>&1 || PERF_EXIT=$?
-          echo "PERF_EXIT_CODE=${PERF_EXIT:-0}" >> $GITHUB_OUTPUT
-          cat perf-report.md
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: performance-report
-          path: perf-report.md
-          retention-days: 30
-      - name: Check performance gate results
-        run: |
-          EXIT_CODE="${{ steps.perf-gates.outputs.PERF_EXIT_CODE }}"
-          if [ "$EXIT_CODE" -eq 0 ]; then
-            echo "All performance gates passed"
-          elif [ "$EXIT_CODE" -eq 2 ]; then
-            echo "Performance gates passed with warnings"
-          else
-            echo "Performance gates failed (exit code: $EXIT_CODE)"
-            if [ "$EXIT_CODE" -eq 1 ]; then
-              exit 1
-            fi
-          fi
+        npx eslint src/domains/learning-optimization/{interfaces.ts,services/metrics-optimizer.ts} src/mcp/tools/learning-optimization/optimize.ts --format json > /tmp/eslint-original.json
 
-      - name: Run instrumentation-sensitive performance baselines
-        run: |
-          npx vitest run tests/performance/milestone1-baselines.test.ts
-          npx vitest run tests/unit/integrations/ruvector/hopfield-memory.test.ts --testNamePattern='single recall'
+        result=$?
 
-      - name: Run native RVF performance baselines
-        run: npx vitest run tests/performance/rvf-pattern-store.test.ts
+        set -e
 
-  # ─── Coverage analysis (PRs only, independent of journey shards) ───
+        test "$result" -eq 1'
+    - name: Apply exact private candidate after proved native red
+      run: 'python - <<''PATCH''
 
-  coverage:
-    name: Coverage Analysis
-    runs-on: ubuntu-latest
-    # Coverage checks out and builds the same revision itself; it consumes no
-    # journey artifacts. Start alongside them rather than extending the PR path.
-    # Full serial V8 instrumentation exceeds ten minutes as the suite grows.
-    # Keep a finite bound while allowing the report and threshold steps to run.
-    timeout-minutes: 30
-    if: success() && github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0', cache: 'npm' }
-      - run: npm ci
-      - run: npm run build
-      - name: Run tests with coverage (excluding browser E2E)
-        # Performance baselines remain authoritative in Performance Gates.
-        # V8 instrumentation adds nondeterministic wall-clock overhead, so the
-        # coverage job exercises correctness paths but excludes pure benchmarks.
-        run: >-
-          bash scripts/ci-vitest-run.sh --coverage --reporter=verbose
-          --exclude='tests/performance/**'
-          --exclude='tests/unit/learning/mmr-scaling.test.ts'
-          --exclude='tests/unit/learning/dream/spreading-activation-bounds.test.ts'
-        env:
-          NODE_OPTIONS: '--max-old-space-size=1024'
-          CI: 'true'
-          AQE_COVERAGE: 'true'
-          CI_VITEST_TIMEOUT: '1500'
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: coverage-report
-          path: coverage/
-          retention-days: 7
-      - name: Check coverage thresholds
-        run: |
-          if [ -f "coverage/coverage-summary.json" ]; then
-            COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
-            echo "Line coverage: ${COVERAGE}%"
-            if (( $(echo "$COVERAGE < 80" | bc -l) )); then
-              echo "Coverage below 80% threshold"
-            else
-              echo "Coverage meets threshold"
-            fi
-          fi
+        import base64,hashlib,json,subprocess
 
-  # ─── Test dashboard (summary) ───
+        from pathlib import Path
 
-  dashboard:
-    name: Test Dashboard
-    runs-on: ubuntu-latest
-    needs: [journey-governance, journey-ruvector-coordination, journey-root, journey-remaining, contract-tests, code-intelligence-tests, infrastructure-tests]
-    if: always()
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: '24.13.0' }
-      - name: Generate Dashboard
-        run: node scripts/test-dashboard.cjs
-      - name: Generate Test Inventory
-        run: node scripts/ci-inventory.cjs
-        env:
-          # The scanned tree is GITHUB_SHA (what actions/checkout checked out). On
-          # pull_request runs that is GitHub's test merge commit, so the PR head is
-          # passed separately and reported as context, not as the scanned commit.
-          CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CI_JOB_OUTCOMES: ${{ toJSON(needs) }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ci-metrics
-          path: |
-            ci-metrics.md
-            ci-metrics.json
-          retention-days: 30
-      - name: Comment on PR
-        # Fork tokens cannot write PR comments; keep reports and test gates running.
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        # The metrics artifact is already uploaded; a transient comment API
-        # failure must not turn a healthy test dashboard red.
-        continue-on-error: true
-        uses: actions/github-script@v9
-        with:
-          retries: 3
-          script: |
-            const fs = require('fs');
+        identity=json.loads(Path(''/tmp/base-identity.json'').read_text())
 
-            const metrics = fs.readFileSync('ci-metrics.md', 'utf8');
+        assert all(hashlib.sha256(Path(f).read_bytes()).hexdigest()==h for f,h in identity.items())
 
-            const marker = '<!-- aqe-optimized-ci-inventory -->';
-            // ci-metrics.md carries its own top-level heading.
-            const body = `${marker}
-            ${metrics}
+        patch=base64.b64decode(''ZGlmZiAtLWdpdCBhL3NyYy9kb21haW5zL2xlYXJuaW5nLW9wdGltaXphdGlvbi9pbnRlcmZhY2VzLnRzIGIvc3JjL2RvbWFpbnMvbGVhcm5pbmctb3B0aW1pemF0aW9uL2ludGVyZmFjZXMudHMKaW5kZXggYzNlZDg1Zjk2MDIyODk2NzJiODI5YjdlNTI5ODRjYWQyNGExYTI5MC4uYjY4YjkyOGQ5M2EwYmEzNDIwMzZkNTdlNDQ3MGMwMzczNDhjMmVlYSAxMDA2NDQKLS0tIGEvc3JjL2RvbWFpbnMvbGVhcm5pbmctb3B0aW1pemF0aW9uL2ludGVyZmFjZXMudHMKKysrIGIvc3JjL2RvbWFpbnMvbGVhcm5pbmctb3B0aW1pemF0aW9uL2ludGVyZmFjZXMudHMKQEAgLTUwLDYgKzUwLDggQEAgZXhwb3J0IGludGVyZmFjZSBQYXR0ZXJuQ29udGV4dCB7CiAgIHJlYWRvbmx5IHRlc3RUeXBlPzogc3RyaW5nOwogICByZWFkb25seSBjb2RlQ29udGV4dD86IHN0cmluZzsKICAgcmVhZG9ubHkgdGFnczogc3RyaW5nW107CisgIC8qKiBFeHBsaWNpdCBzdHJhdGVneSBvYmplY3RpdmU7IGFic2VudCBtZWFucyBubyByZXF1ZXN0ZWQgZGlyZWN0aW9uLiAqLworICByZWFkb25seSBvYmplY3RpdmU/OiBQaWNrPE9wdGltaXphdGlvbk9iamVjdGl2ZSwgJ21ldHJpYycgfCAnZGlyZWN0aW9uJz47CiB9CiAKIGV4cG9ydCBpbnRlcmZhY2UgUGF0dGVyblRlbXBsYXRlIHsKZGlmZiAtLWdpdCBhL3NyYy9kb21haW5zL2xlYXJuaW5nLW9wdGltaXphdGlvbi9zZXJ2aWNlcy9tZXRyaWNzLW9wdGltaXplci50cyBiL3NyYy9kb21haW5zL2xlYXJuaW5nLW9wdGltaXphdGlvbi9zZXJ2aWNlcy9tZXRyaWNzLW9wdGltaXplci50cwppbmRleCA0MGEzY2I5NDNlZDRlYTEzNjBmYjU5NjYzMDFiZjgxMDA4YzhhYjI2Li4wMzhkMTQwY2Q4NjkzZWU3NTBhNWE0MzA1ODUzZDQ1NmIyZDFiNWMyIDEwMDY0NAotLS0gYS9zcmMvZG9tYWlucy9sZWFybmluZy1vcHRpbWl6YXRpb24vc2VydmljZXMvbWV0cmljcy1vcHRpbWl6ZXIudHMKKysrIGIvc3JjL2RvbWFpbnMvbGVhcm5pbmctb3B0aW1pemF0aW9uL3NlcnZpY2VzL21ldHJpY3Mtb3B0aW1pemVyLnRzCkBAIC0yODUsNyArMjg1LDE1IEBAIGV4cG9ydCBjbGFzcyBNZXRyaWNzT3B0aW1pemVyU2VydmljZSBpbXBsZW1lbnRzIElTdHJhdGVneU9wdGltaXplclNlcnZpY2UgewogICAgICAgICBjb25zdCBvcHRpbWl6ZWQgPSBhd2FpdCB0aGlzLm1lbW9yeS5nZXQ8T3B0aW1pemVkU3RyYXRlZ3k+KAogICAgICAgICAgIGtleSwgeyBuYW1lc3BhY2U6ICdsZWFybmluZy1vcHRpbWl6YXRpb24nIH0sCiAgICAgICAgICk7Ci0gICAgICAgIGlmIChvcHRpbWl6ZWQgJiYgY29udGV4dC50YWdzLmluY2x1ZGVzKG9wdGltaXplZC5kb21haW4pICYmIG9wdGltaXplZC5jb25maWRlbmNlID4gMC42KSB7CisgICAgICAgIGlmIChvcHRpbWl6ZWQKKyAgICAgICAgICAmJiBjb250ZXh0LnRhZ3MuaW5jbHVkZXMob3B0aW1pemVkLmRvbWFpbikKKyAgICAgICAgICAmJiBjb250ZXh0LnRhZ3MuaW5jbHVkZXMob3B0aW1pemVkLm9iamVjdGl2ZS5tZXRyaWMpCisgICAgICAgICAgJiYgKCFjb250ZXh0Lm9iamVjdGl2ZSB8fCAoCisgICAgICAgICAgICBjb250ZXh0LnRhZ3MuaW5jbHVkZXMoY29udGV4dC5vYmplY3RpdmUubWV0cmljKQorICAgICAgICAgICAgJiYgb3B0aW1pemVkLm9iamVjdGl2ZS5tZXRyaWMgPT09IGNvbnRleHQub2JqZWN0aXZlLm1ldHJpYworICAgICAgICAgICAgJiYgb3B0aW1pemVkLm9iamVjdGl2ZS5kaXJlY3Rpb24gPT09IGNvbnRleHQub2JqZWN0aXZlLmRpcmVjdGlvbgorICAgICAgICAgICkpCisgICAgICAgICAgJiYgb3B0aW1pemVkLmNvbmZpZGVuY2UgPiAwLjYpIHsKICAgICAgICAgICBjb25zdCBjb250ZXh0U2NvcmUgPSB0aGlzLnNjb3JlQ29udGV4dE1hdGNoKG9wdGltaXplZCwgY29udGV4dCk7CiAgICAgICAgICAgY29uc3QgcGVyZm9ybWFuY2VTY29yZSA9IG9wdGltaXplZC5pbXByb3ZlbWVudCAqIG9wdGltaXplZC5jb25maWRlbmNlOwogICAgICAgICAgIGNhbmRpZGF0ZXMucHVzaCh7CmRpZmYgLS1naXQgYS9zcmMvbWNwL3Rvb2xzL2xlYXJuaW5nLW9wdGltaXphdGlvbi9vcHRpbWl6ZS50cyBiL3NyYy9tY3AvdG9vbHMvbGVhcm5pbmctb3B0aW1pemF0aW9uL29wdGltaXplLnRzCmluZGV4IDM1MzZhMWRjMjkwMjMzOWUxOTk5NjE3MWUxNDI3NDE3NGZjMWZkNDEuLjM1OWY3ZDQ3ZjczNzU2NjRjMDdiMTk2ZDY5ZGQyYzIxZDg2NGNjZTcgMTAwNjQ0Ci0tLSBhL3NyYy9tY3AvdG9vbHMvbGVhcm5pbmctb3B0aW1pemF0aW9uL29wdGltaXplLnRzCisrKyBiL3NyYy9tY3AvdG9vbHMvbGVhcm5pbmctb3B0aW1pemF0aW9uL29wdGltaXplLnRzCkBAIC00NzYsNiArNDc2LDcgQEAgZXhwb3J0IGNsYXNzIExlYXJuaW5nT3B0aW1pemVUb29sIGV4dGVuZHMgTUNQVG9vbEJhc2U8TGVhcm5pbmdPcHRpbWl6ZVBhcmFtcywgTGUKICAgICAgIC8vIE5vdCBlbm91Z2ggZGF0YSAtIHJlY29tbWVuZCBkZWZhdWx0IHN0cmF0ZWd5CiAgICAgICBjb25zdCBjb250ZXh0Rm9yUmVjb21tZW5kYXRpb246IFBhdHRlcm5Db250ZXh0ID0gewogICAgICAgICB0YWdzOiBbdGFyZ2V0RG9tYWluLCBvYmplY3RpdmUubWV0cmljXSwKKyAgICAgICAgb2JqZWN0aXZlOiB7IG1ldHJpYzogb2JqZWN0aXZlLm1ldHJpYywgZGlyZWN0aW9uOiBvYmplY3RpdmUuZGlyZWN0aW9uIH0sCiAgICAgICB9OwogICAgICAgY29uc3QgcmVjb21tZW5kUmVzdWx0ID0gYXdhaXQgbWV0cmljc09wdGltaXplci5yZWNvbW1lbmRTdHJhdGVneShjb250ZXh0Rm9yUmVjb21tZW5kYXRpb24pOwogICAgICAgaWYgKCFyZWNvbW1lbmRSZXN1bHQuc3VjY2VzcykgdGhyb3cgcmVjb21tZW5kUmVzdWx0LmVycm9yOwpkaWZmIC0tZ2l0IGEvdGVzdHMvaW50ZWdyYXRpb24vbGVhcm5pbmcvcmVjb21tZW5kZWQtc3RyYXRlZ3ktbmFtZXNwYWNlLnRlc3QudHMgYi90ZXN0cy9pbnRlZ3JhdGlvbi9sZWFybmluZy9yZWNvbW1lbmRlZC1zdHJhdGVneS1uYW1lc3BhY2UudGVzdC50cwppbmRleCBlZGVhYmZkMWViYWFmMDI5ODU0YmI2YTdlYjk4OTI0ZDkwZTk0MTFhLi5hNzMzNzM2MTY5ODNkZDg0Yzg5NmU5NWRhMTQyMmU2NWVjMWJiMzYwIDEwMDY0NAotLS0gYS90ZXN0cy9pbnRlZ3JhdGlvbi9sZWFybmluZy9yZWNvbW1lbmRlZC1zdHJhdGVneS1uYW1lc3BhY2UudGVzdC50cworKysgYi90ZXN0cy9pbnRlZ3JhdGlvbi9sZWFybmluZy9yZWNvbW1lbmRlZC1zdHJhdGVneS1uYW1lc3BhY2UudGVzdC50cwpAQCAtOTMsNiArOTMsNTkgQEAgZGVzY3JpYmUuZWFjaChbJ3NxbGl0ZScsICdtZW1vcnknXSBhcyBjb25zdCkoJ3N0b3JlZCBzdHJhdGVneSByZWNvbW1lbmRhdGlvbnMgKCUKICAgICB9KTsKICAgfSk7CiAKKyAgZGVzY3JpYmUuZWFjaChbCisgICAgWydsYXRlbmN5JywgJ21pbmltaXplJ10sCisgICAgWydjb3ZlcmFnZScsICdtaW5pbWl6ZSddLAorICBdIGFzIGNvbnN0KSgnc2FtZS1kb21haW4gb2JqZWN0aXZlIHJlcXVlc3QgKCVzLCAlcyknLCAobWV0cmljLCBkaXJlY3Rpb24pID0+IHsKKyAgICBpdCgncmV0dXJucyBkZWZhdWx0IGZvciBhbiBpbmNvbXBhdGlibGUgb2JqZWN0aXZlIHRocm91Z2ggdGhlIHNlcnZpY2UnLCBhc3luYyAoKSA9PiB7CisgICAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOworICAgICAgZXhwZWN0KHJlY29yZC5vYmplY3RpdmUpLnRvTWF0Y2hPYmplY3QoeyBtZXRyaWM6ICdjb3ZlcmFnZScsIGRpcmVjdGlvbjogJ21heGltaXplJyB9KTsKKyAgICAgIGNvbnN0IHJlcXVlc3RDb250ZXh0ID0geyB0YWdzOiBbJ3Rlc3QtZ2VuZXJhdGlvbicsIG1ldHJpY10sIG9iamVjdGl2ZTogeyBtZXRyaWMsIGRpcmVjdGlvbiB9IH07CisgICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBvcHRpbWl6ZXIucmVjb21tZW5kU3RyYXRlZ3kocmVxdWVzdENvbnRleHQpOworICAgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzKS50b0JlKHRydWUpOworICAgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzICYmIHJlc3VsdC52YWx1ZS5uYW1lKS50b0JlKCdkZWZhdWx0LXN0cmF0ZWd5Jyk7CisgICAgfSk7CisKKyAgICBpdCgncmV0dXJucyBkZWZhdWx0IGZvciBhbiBpbmNvbXBhdGlibGUgb2JqZWN0aXZlIHRocm91Z2ggdGhlIE1DUCBmYWxsYmFjaycsIGFzeW5jICgpID0+IHsKKyAgICAgIGNvbnN0IHJlY29yZCA9IGF3YWl0IG9wdGltaXplKCk7CisgICAgICBleHBlY3QocmVjb3JkLm9iamVjdGl2ZSkudG9NYXRjaE9iamVjdCh7IG1ldHJpYzogJ2NvdmVyYWdlJywgZGlyZWN0aW9uOiAnbWF4aW1pemUnIH0pOworICAgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgbmV3IExlYXJuaW5nT3B0aW1pemVUb29sKCkuaW52b2tlKHsKKyAgICAgICAgYWN0aW9uOiAnb3B0aW1pemUnLCBkb21haW46ICd0ZXN0LWdlbmVyYXRpb24nLCBvYmplY3RpdmU6IHsgbWV0cmljLCBkaXJlY3Rpb24gfSwKKyAgICAgIH0sIHsgbWVtb3J5IH0pOworICAgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzKS50b0JlKHRydWUpOworICAgICAgZXhwZWN0KHJlc3VsdC5kYXRhPy5vcHRpbWl6ZVJlc3VsdD8uYmVzdFN0cmF0ZWd5Lm5hbWUpLnRvQmUoJ2RlZmF1bHQtc3RyYXRlZ3knKTsKKyAgICB9KTsKKyAgfSk7CisKKyAgaXQoJ3JldGFpbnMgbGVnYWN5IGRpcmVjdGlvbi11bnNwZWNpZmllZCByZWNvbW1lbmRhdGlvbnMnLCBhc3luYyAoKSA9PiB7CisgICAgY29uc3QgcmVjb3JkID0gYXdhaXQgb3B0aW1pemUoKTsKKyAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBvcHRpbWl6ZXIucmVjb21tZW5kU3RyYXRlZ3koY29udGV4dCk7CisgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzICYmIHJlc3VsdC52YWx1ZSkudG9FcXVhbChyZWNvcmQub3B0aW1pemVkU3RyYXRlZ3kpOworICB9KTsKKworICBpdCgncmVjb21tZW5kcyBhbiBleHBsaWNpdGx5IG1hdGNoaW5nIG9iamVjdGl2ZScsIGFzeW5jICgpID0+IHsKKyAgICBjb25zdCByZWNvcmQgPSBhd2FpdCBvcHRpbWl6ZSgpOworICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IG9wdGltaXplci5yZWNvbW1lbmRTdHJhdGVneSh7IC4uLmNvbnRleHQsIG9iamVjdGl2ZTogeyBtZXRyaWM6ICdjb3ZlcmFnZScsIGRpcmVjdGlvbjogJ21heGltaXplJyB9IH0pOworICAgIGV4cGVjdChyZXN1bHQuc3VjY2VzcyAmJiByZXN1bHQudmFsdWUpLnRvRXF1YWwocmVjb3JkLm9wdGltaXplZFN0cmF0ZWd5KTsKKyAgfSk7CisKKyAgaXQoJ3JlZnVzZXMgY29udHJhZGljdG9yeSBtZXRyaWMgdGFncyBhbmQgZXhwbGljaXQgb2JqZWN0aXZlJywgYXN5bmMgKCkgPT4geworICAgIGF3YWl0IG9wdGltaXplKCk7CisgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgb3B0aW1pemVyLnJlY29tbWVuZFN0cmF0ZWd5KHsgLi4uY29udGV4dCwgb2JqZWN0aXZlOiB7IG1ldHJpYzogJ2xhdGVuY3knLCBkaXJlY3Rpb246ICdtaW5pbWl6ZScgfSB9KTsKKyAgICBleHBlY3QocmVzdWx0LnN1Y2Nlc3MgJiYgcmVzdWx0LnZhbHVlLm5hbWUpLnRvQmUoJ2RlZmF1bHQtc3RyYXRlZ3knKTsKKyAgfSk7CisKKyAgaXQoJ2lnbm9yZXMgYSBoaWdoZXItc2NvcmluZyB3cm9uZy1vYmplY3RpdmUgY2FuZGlkYXRlJywgYXN5bmMgKCkgPT4geworICAgIGNvbnN0IHJlY29yZCA9IGF3YWl0IG9wdGltaXplKCk7CisgICAgYXdhaXQgbWVtb3J5LnNldCgnbGVhcm5pbmc6c3RyYXRlZ3k6b3B0aW1pemVkOndyb25nLW9iamVjdGl2ZScsIHsKKyAgICAgIC4uLnJlY29yZCwgaWQ6ICd3cm9uZy1vYmplY3RpdmUnLCBvYmplY3RpdmU6IHsgLi4ucmVjb3JkLm9iamVjdGl2ZSwgZGlyZWN0aW9uOiAnbWluaW1pemUnIH0sCisgICAgICBjb25maWRlbmNlOiAxLCBpbXByb3ZlbWVudDogMTAwMDAsCisgICAgICBvcHRpbWl6ZWRTdHJhdGVneTogeyAuLi5yZWNvcmQub3B0aW1pemVkU3RyYXRlZ3ksIG5hbWU6ICd3cm9uZy1vYmplY3RpdmUtaGlnaC1zY29yZScgfSwKKyAgICB9LCBOUyk7CisgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgb3B0aW1pemVyLnJlY29tbWVuZFN0cmF0ZWd5KHsgLi4uY29udGV4dCwgb2JqZWN0aXZlOiB7IG1ldHJpYzogJ2NvdmVyYWdlJywgZGlyZWN0aW9uOiAnbWF4aW1pemUnIH0gfSk7CisgICAgZXhwZWN0KHJlc3VsdC5zdWNjZXNzICYmIHJlc3VsdC52YWx1ZSkudG9FcXVhbChyZWNvcmQub3B0aW1pemVkU3RyYXRlZ3kpOworICB9KTsKKwogICBpdCgncmVqZWN0cyBhIGhpZ2hlci1zY29yaW5nIG90aGVyLWRvbWFpbiBjYW5kaWRhdGUgd2l0aG91dCBoaWRpbmcgdGhlIGVsaWdpYmxlIHN0cmF0ZWd5JywgYXN5bmMgKCkgPT4gewogICAgIGNvbnN0IHJlY29yZCA9IGF3YWl0IG9wdGltaXplKCk7CiAgICAgYXdhaXQgbWVtb3J5LnNldCgnbGVhcm5pbmc6c3RyYXRlZ3k6b3B0aW1pemVkOmZvcmVpZ24tZG9tYWluJywgewo='')
 
-            ---
-            *Generated by Optimized CI*`;
+        assert hashlib.sha256(patch).hexdigest()==''0882d063422a0966a68d6328e320d8f804a71f23f105a83c385f062a3fe2a27f''
 
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
+        Path(''/tmp/candidate.patch'').write_bytes(patch)
 
-            const botComment = comments.find(c =>
-              c.user?.type === 'Bot' && c.body?.includes(marker)
-            );
+        subprocess.run([''git'',''apply'',''--index'',''/tmp/candidate.patch''],check=True)
 
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body
-              });
-            }
+        assert subprocess.check_output([''git'',''write-tree'']).decode().strip()==''099d8f3f8deb36d80dddb5b1796792d260122cae''
+
+        Path(''/tmp/candidate-identity.json'').write_text(json.dumps({''src/domains/learning-optimization/interfaces.ts'': ''c292690bad57a7a29902274e77ffc43818e913d7cd19b7e02c449b8ec32597f9'', ''src/domains/learning-optimization/services/metrics-optimizer.ts'': ''6abbfbfd86abe7a98509cb29bcba9e479d46ece8ca617ab385769d8247fc19c5'', ''src/mcp/tools/learning-optimization/optimize.ts'': ''73f18ddf65828ad7f264579ad8d63ddcd1baab256cfde832054ca130ce035221'', ''tests/integration/learning/recommended-strategy-namespace.test.ts'': ''69bde9eab697064b1eabaeb4f8d7d47a36d2aa1408254d6a7a2e0f384d46baab''},sort_keys=True))
+
+        Path(''/tmp/stdio-proof.mjs'').write_bytes(base64.b64decode(''aW1wb3J0IHsgcGF0aFRvRmlsZVVSTCB9IGZyb20gJ25vZGU6dXJsJzsKaW1wb3J0IHsgcmVzb2x2ZSxqb2luIH0gZnJvbSAnbm9kZTpwYXRoJzsKaW1wb3J0IHsgbWtkdGVtcFN5bmMsbWtkaXJTeW5jLHdyaXRlRmlsZVN5bmMscm1TeW5jIH0gZnJvbSAnbm9kZTpmcyc7CmltcG9ydCB7IHRtcGRpciB9IGZyb20gJ25vZGU6b3MnOwppbXBvcnQgeyBzcGF3biB9IGZyb20gJ25vZGU6Y2hpbGRfcHJvY2Vzcyc7CmltcG9ydCByZWFkbGluZSBmcm9tICdub2RlOnJlYWRsaW5lJzsKaW1wb3J0IGFzc2VydCBmcm9tICdub2RlOmFzc2VydC9zdHJpY3QnOwpjb25zdCByZXBvPXByb2Nlc3MuY3dkKCksIHJvb3Q9bWtkdGVtcFN5bmMoam9pbih0bXBkaXIoKSwnYXFlMTA5MS1zdGRpby0nKSksIHJvd3M9W107CmNvbnN0IHtjcmVhdGVNZW1vcnlCYWNrZW5kfT1hd2FpdCBpbXBvcnQocGF0aFRvRmlsZVVSTChyZXNvbHZlKCdkaXN0L2tlcm5lbC9tZW1vcnktZmFjdG9yeS5qcycpKSk7CmNvbnN0IHtNZXRyaWNzT3B0aW1pemVyU2VydmljZX09YXdhaXQgaW1wb3J0KHBhdGhUb0ZpbGVVUkwocmVzb2x2ZSgnZGlzdC9kb21haW5zL2xlYXJuaW5nLW9wdGltaXphdGlvbi9zZXJ2aWNlcy9tZXRyaWNzLW9wdGltaXplci5qcycpKSk7CmNvbnN0IGRiPWpvaW4ocm9vdCwnLmFnZW50aWMtcWUnLCdtZW1vcnkuZGInKTtta2RpclN5bmMoam9pbihyb290LCcuYWdlbnRpYy1xZScpLHtyZWN1cnNpdmU6dHJ1ZX0pOwpjb25zdCB7YmFja2VuZDptZW1vcnl9PWF3YWl0IGNyZWF0ZU1lbW9yeUJhY2tlbmQoe3R5cGU6J3NxbGl0ZScsc3FsaXRlOntwYXRoOmRiLHdhbE1vZGU6dHJ1ZX19LHRydWUpOwpjb25zdCBleHBlcmllbmNlcz1BcnJheS5mcm9tKHtsZW5ndGg6NDB9LChfLGkpPT4oe2lkOmBzdGRpby0ke2l9YCxhZ2VudElkOnt2YWx1ZTonZml4dHVyZScsZG9tYWluOid0ZXN0LWdlbmVyYXRpb24nLHR5cGU6J3NwZWNpYWxpc3QnfSxkb21haW46J3Rlc3QtZ2VuZXJhdGlvbicsYWN0aW9uOidmaXh0dXJlJyxzdGF0ZTp7Y29udGV4dDp7fSxtZXRyaWNzOnt9fSxyZXN1bHQ6e3N1Y2Nlc3M6dHJ1ZSxvdXRjb21lOntjb3ZlcmFnZTo5MH0sZHVyYXRpb246MX0scmV3YXJkOjEsdGltZXN0YW1wOm5ldyBEYXRlKCl9KSk7CmNvbnN0IG9wdGltaXplZD1hd2FpdCBuZXcgTWV0cmljc09wdGltaXplclNlcnZpY2UobWVtb3J5LHtleHBsb3JhdGlvblJhdGU6MH0pLm9wdGltaXplU3RyYXRlZ3koe25hbWU6J3N0ZGlvLWNvdmVyYWdlLXN0cmF0ZWd5JyxwYXJhbWV0ZXJzOnt0aW1lb3V0OjcwMDB9LGV4cGVjdGVkT3V0Y29tZTp7Y292ZXJhZ2U6OTB9fSx7bWV0cmljOidjb3ZlcmFnZScsZGlyZWN0aW9uOidtYXhpbWl6ZScsY29uc3RyYWludHM6W119LGV4cGVyaWVuY2VzKTsKYXNzZXJ0LmVxdWFsKG9wdGltaXplZC5zdWNjZXNzLHRydWUpO2Fzc2VydC5vayhvcHRpbWl6ZWQudmFsdWUuY29uZmlkZW5jZT4wLjYpO2F3YWl0IG1lbW9yeS5kaXNwb3NlKCk7CmNvbnN0IGNoaWxkPXNwYXduKHByb2Nlc3MuZXhlY1BhdGgsW3Jlc29sdmUoJ2Rpc3QvbWNwL2J1bmRsZS5qcycpXSx7Y3dkOnJvb3QsZGV0YWNoZWQ6dHJ1ZSxzdGRpbzpbJ3BpcGUnLCdwaXBlJywncGlwZSddLGVudjp7Li4ucHJvY2Vzcy5lbnYsQVFFX0hUVFBfUE9SVDonMCcsQVFFX1BST0pFQ1RfUk9PVDpyb290LEFRRV9NRU1PUllfQkFDS0VORDonc3FsaXRlJyxBUUVfTUVNT1JZX1BBVEg6ZGJ9fSk7CmNvbnN0IHBlbmRpbmc9bmV3IE1hcCgpO2xldCBpZD0wO2NvbnN0IHN0ZGVycj1bXTsKcmVhZGxpbmUuY3JlYXRlSW50ZXJmYWNlKHtpbnB1dDpjaGlsZC5zdGRlcnJ9KS5vbignbGluZScsbD0+c3RkZXJyLnB1c2gobCkpOwpyZWFkbGluZS5jcmVhdGVJbnRlcmZhY2Uoe2lucHV0OmNoaWxkLnN0ZG91dH0pLm9uKCdsaW5lJyxsPT57bGV0IG07dHJ5e209SlNPTi5wYXJzZShsKTt9Y2F0Y2h7cmV0dXJuO31jb25zdCBwPXBlbmRpbmcuZ2V0KG0uaWQpO2lmKHApe2NsZWFyVGltZW91dChwLnRpbWVyKTtwZW5kaW5nLmRlbGV0ZShtLmlkKTtwLnJlc29sdmUobSk7fX0pOwpmdW5jdGlvbiByZXF1ZXN0KG1ldGhvZCxwYXJhbXMpe3JldHVybiBuZXcgUHJvbWlzZSgocmVzb2x2ZSxyZWplY3QpPT57Y29uc3QgaT0rK2lkO2NvbnN0IHRpbWVyPXNldFRpbWVvdXQoKCk9PnJlamVjdChuZXcgRXJyb3IoJ3N0ZGlvIHRpbWVvdXQgJyttZXRob2QpKSw5MDAwMCk7cGVuZGluZy5zZXQoaSx7cmVzb2x2ZSxyZWplY3QsdGltZXJ9KTtjaGlsZC5zdGRpbi53cml0ZShKU09OLnN0cmluZ2lmeSh7anNvbnJwYzonMi4wJyxpZDppLG1ldGhvZCxwYXJhbXN9KSsnXG4nKTt9KTt9CnRyeXsKIGNvbnN0IGluaXQ9YXdhaXQgcmVxdWVzdCgnaW5pdGlhbGl6ZScse3Byb3RvY29sVmVyc2lvbjonMjAyNC0xMS0wNScsY2FwYWJpbGl0aWVzOnt9LGNsaWVudEluZm86e25hbWU6J2FxZTEwOTEtbmF0aXZlLXByb29mJyx2ZXJzaW9uOicxJ319KTthc3NlcnQuZXF1YWwoaW5pdC5lcnJvcix1bmRlZmluZWQpO2NoaWxkLnN0ZGluLndyaXRlKEpTT04uc3RyaW5naWZ5KHtqc29ucnBjOicyLjAnLG1ldGhvZDonbm90aWZpY2F0aW9ucy9pbml0aWFsaXplZCcscGFyYW1zOnt9fSkrJ1xuJyk7CiBjb25zdCBsaXN0ZWQ9YXdhaXQgcmVxdWVzdCgndG9vbHMvbGlzdCcse30pO2Fzc2VydC5lcXVhbChsaXN0ZWQuZXJyb3IsdW5kZWZpbmVkKTthc3NlcnQub2sobGlzdGVkLnJlc3VsdC50b29scy5zb21lKHQ9PnQubmFtZT09PSdxZS9sZWFybmluZy9vcHRpbWl6ZScpKTsKIGZvcihjb25zdCBbZG9tYWluLG1ldHJpYyxkaXJlY3Rpb24sZXhwZWN0ZWRdIG9mIFsKIFsndGVzdC1nZW5lcmF0aW9uJywnY292ZXJhZ2UnLCdtYXhpbWl6ZScsb3B0aW1pemVkLnZhbHVlLm9wdGltaXplZFN0cmF0ZWd5Lm5hbWVdLAogWyd0ZXN0LWdlbmVyYXRpb24nLCdsYXRlbmN5JywnbWluaW1pemUnLCdkZWZhdWx0LXN0cmF0ZWd5J10sCiBbJ3Rlc3QtZ2VuZXJhdGlvbicsJ2NvdmVyYWdlJywnbWluaW1pemUnLCdkZWZhdWx0LXN0cmF0ZWd5J10sCiBbJ2NoYW9zLXJlc2lsaWVuY2UnLCdsYXRlbmN5JywnbWluaW1pemUnLCdkZWZhdWx0LXN0cmF0ZWd5J10sCiBbJ3NlY3VyaXR5LWNvbXBsaWFuY2UnLCdjb3ZlcmFnZScsJ21heGltaXplJywnZGVmYXVsdC1zdHJhdGVneSddLAogWyd0ZXN0LWdlbmVyYXRpb24nLCdjb3ZlcmFnZScsJ21heGltaXplJyxvcHRpbWl6ZWQudmFsdWUub3B0aW1pemVkU3RyYXRlZ3kubmFtZV0sCiBbJ3Rlc3QtZ2VuZXJhdGlvbicsJ2xhdGVuY3knLCdtYXhpbWl6ZScsJ2RlZmF1bHQtc3RyYXRlZ3knXSwKIFsndGVzdC1nZW5lcmF0aW9uJywnY292ZXJhZ2UnLCdtaW5pbWl6ZScsJ2RlZmF1bHQtc3RyYXRlZ3knXV0pewogIGNvbnN0IHJlc3BvbnNlPWF3YWl0IHJlcXVlc3QoJ3Rvb2xzL2NhbGwnLHtuYW1lOidxZS9sZWFybmluZy9vcHRpbWl6ZScsYXJndW1lbnRzOnthY3Rpb246J29wdGltaXplJyxkb21haW4sb2JqZWN0aXZlOnttZXRyaWMsZGlyZWN0aW9ufX19KTthc3NlcnQuZXF1YWwocmVzcG9uc2UuZXJyb3IsdW5kZWZpbmVkKTthc3NlcnQubm90RXF1YWwocmVzcG9uc2UucmVzdWx0LmlzRXJyb3IsdHJ1ZSk7CiAgY29uc3QgdGV4dHM9cmVzcG9uc2UucmVzdWx0LmNvbnRlbnQuZmlsdGVyKGM9PmMudHlwZT09PSd0ZXh0JykubWFwKGM9PmMudGV4dCk7Y29uc3QgZGVjb2RlZD10ZXh0cy5tYXAodD0+e3RyeXtyZXR1cm4gSlNPTi5wYXJzZSh0KTt9Y2F0Y2h7cmV0dXJuIG51bGw7fX0pLmZpbHRlcihCb29sZWFuKTtjb25zdCBkYXRhPWRlY29kZWQuZmluZChkPT5kLm9wdGltaXplUmVzdWx0fHxkLmRhdGE/Lm9wdGltaXplUmVzdWx0KTthc3NlcnQub2soZGF0YSwnc3RydWN0dXJlZCB0b29sIHJlc3VsdCByZXF1aXJlZCcpO2NvbnN0IHJlc3VsdD1kYXRhLm9wdGltaXplUmVzdWx0Pz9kYXRhLmRhdGEub3B0aW1pemVSZXN1bHQ7cm93cy5wdXNoKHtkb21haW4sbWV0cmljLGRpcmVjdGlvbixleHBlY3RlZCxhY3R1YWw6cmVzdWx0LmJlc3RTdHJhdGVneSxyZXNwb25zZX0pO2Fzc2VydC5lcXVhbChyZXN1bHQuYmVzdFN0cmF0ZWd5Lm5hbWUsZXhwZWN0ZWQpOwogfQogd3JpdGVGaWxlU3luYygnL3RtcC9hcWUxMDkxLXN0ZGlvLXJlc3VsdHMuanNvbicsSlNPTi5zdHJpbmdpZnkoe29wdGltaXplZDpvcHRpbWl6ZWQudmFsdWUscm93c30sbnVsbCwyKSk7Cn1maW5hbGx5ewogd3JpdGVGaWxlU3luYygnL3RtcC9hcWUxMDkxLXN0ZGlvLXN0ZGVyci5sb2cnLHN0ZGVyci5qb2luKCdcbicpKTt3cml0ZUZpbGVTeW5jKCcvdG1wL2FxZTEwOTEtc3RkaW8tcGFydGlhbC5qc29uJyxKU09OLnN0cmluZ2lmeShyb3dzLG51bGwsMikpO2NvbnN0IGV4aXRlZCA9IGNoaWxkLmV4aXRDb2RlICE9PSBudWxsIHx8IGNoaWxkLnNpZ25hbENvZGUgIT09IG51bGwKICA/IFByb21pc2UucmVzb2x2ZSh7IGNvZGU6IGNoaWxkLmV4aXRDb2RlLCBzaWduYWw6IGNoaWxkLnNpZ25hbENvZGUgfSkKICA6IG5ldyBQcm9taXNlKHJlc29sdmUgPT4gY2hpbGQub25jZSgnZXhpdCcsIChjb2RlLCBzaWduYWwpID0+IHJlc29sdmUoeyBjb2RlLCBzaWduYWwgfSkpKTsKIGNvbnN0IGJvdW5kZWQgPSBhc3luYyBtcyA9PiB7IGxldCB0aW1lcjsgY29uc3QgcmVzdWx0ID0gYXdhaXQgUHJvbWlzZS5yYWNlKFtleGl0ZWQsIG5ldyBQcm9taXNlKHJlc29sdmUgPT4ge3RpbWVyPXNldFRpbWVvdXQoKCk9PnJlc29sdmUobnVsbCksbXMpO30pXSk7Y2xlYXJUaW1lb3V0KHRpbWVyKTtyZXR1cm4gcmVzdWx0OyB9OwogbGV0IHNpZ25hbEVycm9yPW51bGw7CiB0cnl7cHJvY2Vzcy5raWxsKC1jaGlsZC5waWQsJ1NJR1RFUk0nKTt9Y2F0Y2goZXJyb3Ipe3NpZ25hbEVycm9yPVN0cmluZyhlcnJvcik7fQogbGV0IG91dGNvbWU9YXdhaXQgYm91bmRlZCgxMDAwMCksZm9yY2VkPWZhbHNlOwogaWYoIW91dGNvbWUpe2ZvcmNlZD10cnVlO3RyeXtwcm9jZXNzLmtpbGwoLWNoaWxkLnBpZCwnU0lHS0lMTCcpO31jYXRjaHt9O291dGNvbWU9YXdhaXQgYm91bmRlZCg1MDAwKTt9CiBmb3IoY29uc3QgcCBvZiBwZW5kaW5nLnZhbHVlcygpKWNsZWFyVGltZW91dChwLnRpbWVyKTsKIHdyaXRlRmlsZVN5bmMoJy90bXAvYXFlMTA5MS1zdGRpby1jbGVhbnVwLmpzb24nLEpTT04uc3RyaW5naWZ5KHsgZXhpdGVkOiEhb3V0Y29tZSxvdXRjb21lLGZvcmNlZCxzaWduYWxFcnJvcixmaXh0dXJlUmVtb3ZlZDohIW91dGNvbWUgfSxudWxsLDIpKTsKIGlmKG91dGNvbWUpcm1TeW5jKHJvb3Qse3JlY3Vyc2l2ZTp0cnVlLGZvcmNlOnRydWV9KTsKIGFzc2VydC5vayhvdXRjb21lLCdNQ1AgcHJvY2VzcyBncm91cCBtdXN0IGV4aXQgYmVmb3JlIGZpeHR1cmUgcmVtb3ZhbCcpOwp9CmNvbnNvbGUubG9nKCdFaWdodCByZWFsIGJ1aWx0LWJ1bmRsZSBzdGRpbyBvYmplY3RpdmUgY2FzZXMgUEFTUycpOwo=''))
+
+        PATCH'
+    - name: Verify no added lint diagnostics and build actual runtime only
+      run: "set +e\nnpx eslint src/domains/learning-optimization/{interfaces.ts,services/metrics-optimizer.ts} src/mcp/tools/learning-optimization/optimize.ts --format json > /tmp/eslint-candidate.json\nresult=$?\nset -e\ntest \"$result\" -eq 1\npython - <<'LINT'\nimport json\nfrom pathlib import Path\ndef diagnostics(name):\n rows=json.loads(Path(name).read_text());out=[]\n for r in rows:\n  for m in r['messages']:out.append((r['filePath'].split('/src/')[-1],m['ruleId'],m['severity'],m['message']))\n return out\na=diagnostics('/tmp/eslint-original.json');b=diagnostics('/tmp/eslint-candidate.json')\nassert a==b and len(a)==1 and a[0][0]=='mcp/tools/learning-optimization/optimize.ts' and a[0][1]=='unused-imports/no-unused-vars' and \"'totalRelevance'\" in a[0][3]\nPath('/tmp/eslint-inherited-only.json').write_text(json.dumps({'original':a,'candidate':b,'added':0,'lint_status':'inherited failure; not green'}))\nLINT\nnpx tsc > /tmp/runtime-tsc.log 2>&1\nnpm run build:esm > /tmp/runtime-esm.log 2>&1\nnpm run build:mcp > /tmp/runtime-mcp.log 2>&1"
+    - name: Full applicable learning suites
+      run: 'npx vitest run tests/unit/domains/learning-optimization tests/unit/mcp/tools/learning-optimize-sona.test.ts tests/integration/learning --reporter=junit --outputFile=/tmp/learning.xml > /tmp/learning.log 2>&1
+
+        cat /tmp/learning.log
+
+        python - <<''SUITES''
+
+        import xml.etree.ElementTree as E,json
+
+        from pathlib import Path
+
+        r=E.parse(''/tmp/learning.xml'').getroot();assert not r.findall(''.//failure'') and not r.findall(''.//error'')
+
+        Path(''/tmp/learning-counts.json'').write_text(json.dumps({''cases'':len(r.findall(''.//testcase'')),''skipped'':len(r.findall(''.//skipped'')),''failures'':0,''errors'':0}))
+
+        assert len(r.findall(''.//testcase''))>=700
+
+        SUITES'
+    - name: Actual built MCP stdio boundary objective parity
+      run: 'node /tmp/stdio-proof.mjs > /tmp/stdio.log 2>&1
+
+        cat /tmp/stdio.log'
+    - name: Final exact source byte and tree guards
+      if: always()
+      run: 'git diff --exit-code
+
+        test "$(git diff --cached --binary --full-index | sha256sum | cut -d'' '' -f1)" = 0882d063422a0966a68d6328e320d8f804a71f23f105a83c385f062a3fe2a27f
+
+        test "$(git write-tree)" = 099d8f3f8deb36d80dddb5b1796792d260122cae
+
+        python - <<''GUARD''
+
+        import hashlib,json
+
+        from pathlib import Path
+
+        expected=json.loads(Path(''/tmp/base-identity.json'').read_text());expected.update(json.loads(Path(''/tmp/candidate-identity.json'').read_text()))
+
+        assert all(hashlib.sha256(Path(f).read_bytes()).hexdigest()==h for f,h in expected.items())
+
+        GUARD'
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: aqe1091-typed-objective-qualification
+        path: '/tmp/base-identity.json
+
+          /tmp/candidate.patch
+
+          /tmp/candidate-identity.json
+
+          /tmp/focused.xml
+
+          /tmp/focused.log
+
+          /tmp/build.log
+
+          /tmp/typecheck.log
+
+          /tmp/eslint.log
+
+          /tmp/learning.xml
+
+          /tmp/learning.log
+
+          /tmp/learning-counts.json
+
+          /tmp/stdio-proof.mjs
+
+          /tmp/stdio.log
+
+          /tmp/aqe1091-stdio-results.json
+
+          /tmp/aqe1091-stdio-partial.json
+
+          /tmp/aqe1091-stdio-stderr.log
+
+          /tmp/aqe1091-stdio-cleanup.json
+
+          /tmp/eslint-original.json
+
+          /tmp/eslint-candidate.json
+
+          /tmp/eslint-inherited-only.json
+
+          /tmp/runtime-tsc.log
+
+          /tmp/runtime-esm.log
+
+          /tmp/runtime-mcp.log'
+        if-no-files-found: error
