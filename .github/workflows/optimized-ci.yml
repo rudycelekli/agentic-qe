@@ -176,5 +176,6 @@ jobs:
           /tmp/aqe1091-stdio-partial.json
 
           /tmp/aqe1091-stdio-stderr.log
+
           /tmp/aqe1091-stdio-cleanup.json'
         if-no-files-found: error
